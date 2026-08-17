@@ -11,7 +11,7 @@ function getStoredServerUrl(): string {
 // Backend URL:
 //  · Web version is deployed same-origin as the backend (https://dtee.os.hi.cn:5901/m) → use the "current page origin", no config, no CORS.
 //  · Native app (bundled into Capacitor, origin is capacitor://localhost) / local dev → use a hardcoded backend URL.
-const BACKEND = 'https://dtee.os.hi.cn:5901';
+const BACKEND = 'https://eeclass.dtee.top:5901';
 function defaultOrigin(): string {
   if (typeof window === 'undefined') return BACKEND;
   const o = window.location.origin;

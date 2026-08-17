@@ -1,0 +1,61 @@
+name: Build Android APK
+
+# Manual run (Actions tab → Run workflow) gives a downloadable artifact.
+# Pushing a tag like v1.0.0 also attaches the APK to a GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # needed to create/attach the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build web assets
+        run: BASE_PATH=/ npm run build
+
+      - name: Add & sync Android platform
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Build debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk eeclass-android-debug.apk
+
+      - name: Upload build artifact (manual runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeclass-android-debug
+          path: eeclass-android-debug.apk
+
+      - name: Attach APK to release (on tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: eeclass-android-debug.apk
