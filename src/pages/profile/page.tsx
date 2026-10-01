@@ -6,8 +6,10 @@ import {
   getAiDefault, setAiDefault,
   getMicGain, setMicGain, MIC_GAIN_MIN, MIC_GAIN_MAX,
   getTheme, setTheme as saveTheme, type Theme,
+  getMaterialMode, setMaterialMode, type MaterialMode,
 } from '@/lib/settings';
 import { CHANGELOG } from '@/lib/changelog';
+import ClassFileLibrary from '@/components/feature/ClassFileLibrary';
 
 export default function ProfilePage() {
   const navigate = useNavigate();
@@ -27,6 +29,8 @@ export default function ProfilePage() {
   const [aiCorrect, setAiCorrect] = useState(() => getAiDefault('aiCorrect'));
   const [smartSeg, setSmartSeg] = useState(() => getAiDefault('smartSeg'));
   const [autoSummary, setAutoSummary] = useState(() => getAiDefault('autoSummary'));
+  const [materialMode, setMaterialModeState] = useState<MaterialMode>(() => getMaterialMode());
+  const [showFiles, setShowFiles] = useState(false);
 
   // Delete account (irreversible): confirm with password, wipe all data, then sign out.
   // NB: use a raw fetch, not apiFetch — apiFetch turns a wrong-password 403 into "登录已过期" and clears the token.
@@ -120,6 +124,8 @@ export default function ProfilePage() {
     { icon: 'ri-settings-3-line', label: 'AI 处理默认开关', action: () => setShowAiDefaults(true) },
     { icon: 'ri-palette-line', label: '深浅色主题', action: () => setShowTheme(true) },
     { icon: 'ri-mic-line', label: '拾音灵敏度', action: () => setShowMicGain(true) },
+    { icon: 'ri-folder-3-line', label: '课堂文件库', action: () => setShowFiles(true) },
+    { icon: 'ri-translate-2', label: '会议翻译', action: () => navigate('/meeting') },
     { icon: 'ri-price-tag-3-line', label: '标签管理', action: () => navigate('/tags') },
     ...(isAdmin ? [{ icon: 'ri-fingerprint-line', label: '声纹库（管理员）', action: () => navigate('/voiceprints') }] : []),
     { icon: 'ri-book-open-line', label: '参考资料', action: () => navigate('/syllabus') },
@@ -282,6 +288,27 @@ export default function ProfilePage() {
               <AiSwitch on={autoSummary} set={() => toggleAiDefault('autoSummary', autoSummary, setAutoSummary)}
                 icon="ri-file-list-3-line" label="结束录制自动生成摘要" desc="停止录制后自动跳到摘要页并生成" />
             </div>
+            {/* How files from the class file library are folded into a summary */}
+            <p className="text-xs text-foreground-500 mt-4 mb-2">生成摘要时结合课堂资料</p>
+            <div className="flex gap-1.5 p-1 bg-background-100 rounded-xl">
+              {([
+                { v: 'manual' as MaterialMode, label: '每次询问' },
+                { v: 'auto' as MaterialMode, label: '自动匹配' },
+              ]).map((o) => (
+                <button
+                  key={o.v}
+                  onClick={() => { setMaterialModeState(o.v); setMaterialMode(o.v); }}
+                  className={`flex-1 py-2 rounded-lg text-xs ${materialMode === o.v ? 'bg-accent-500 text-background-50 font-semibold' : 'text-foreground-500'}`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-foreground-400 mt-1.5 leading-relaxed">
+              {materialMode === 'manual'
+                ? '生成摘要前弹出课堂文件库,勾选这节课相关的课件/讲义;也可跳过。'
+                : '不再询问,由服务器从课堂文件库里自动找出相关资料。'}
+            </p>
           </div>
         </div>
       )}
@@ -378,7 +405,7 @@ export default function ProfilePage() {
                 type="range"
                 min={MIC_GAIN_MIN}
                 max={MIC_GAIN_MAX}
-                step={0.1}
+                step={0.5}
                 value={micGain}
                 onChange={(e) => onMicGainChange(parseFloat(e.target.value))}
                 className="w-full accent-accent-500"
@@ -388,12 +415,14 @@ export default function ProfilePage() {
                 <span>{MIC_GAIN_MAX.toFixed(1)}×</span>
               </div>
               <p className="text-xs text-foreground-400 leading-relaxed">
-                声音太小听不清时可调高,音量过大或环境嘈杂时调低。调整将在下次开启麦克风时生效。
+                教室里老师离得远,默认拉满(12×);内置限幅,调高也不会削波失真。声音过大或环境嘈杂时可调低。录音页也能实时调整。
               </p>
             </div>
           </div>
         </div>
       )}
+
+      {showFiles && <ClassFileLibrary onClose={() => setShowFiles(false)} />}
 
       {showDel && (
         <div

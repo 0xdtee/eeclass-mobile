@@ -8,6 +8,8 @@ import AnimatedNumber from '@/components/feature/AnimatedNumber';
 import CourseTypeModal from '@/pages/dashboard/components/CourseTypeModal';
 import SummaryListModal from '@/pages/dashboard/components/SummaryListModal';
 import AudioListModal from '@/pages/dashboard/components/AudioListModal';
+import ClassFileLibrary from '@/components/feature/ClassFileLibrary';
+import { useLiveCaption } from '@/hooks/useLiveCaption';
 
 interface SessionMeta {
   sid: string;
@@ -37,6 +39,9 @@ export default function MobileHomePage() {
   const [showCourseTypes, setShowCourseTypes] = useState(false);
   const [showAudioList, setShowAudioList] = useState(false);
   const [showSummaryList, setShowSummaryList] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
+  // A recording keeps running while you browse; leaving the record tab must not hide the way back to it.
+  const live = useLiveCaption();
 
   // Real data: all sessions + tags
   const { sessions } = useSessions();
@@ -158,15 +163,28 @@ export default function MobileHomePage() {
     }
   };
 
-  const quickActions = [
+  const quickActions: { icon: string; label: string; bg: string; iconColor: string; path?: string; action?: () => void }[] = [
     { icon: 'ri-mic-line', label: '开始录音', bg: 'bg-accent-500', iconColor: 'text-background-50', path: '/record' },
+    { icon: 'ri-translate-2', label: '会议翻译', bg: 'bg-background-100', iconColor: 'text-primary-600', path: '/meeting' },
+    { icon: 'ri-calendar-line', label: '课表', bg: 'bg-background-100', iconColor: 'text-accent-600', path: '/schedule' },
+    { icon: 'ri-folder-3-line', label: '课堂文件', bg: 'bg-background-100', iconColor: 'text-secondary-600', action: () => setShowFiles(true) },
     { icon: 'ri-history-line', label: '历史记录', bg: 'bg-background-100', iconColor: 'text-accent-600', path: '/courses' },
-    { icon: 'ri-magic-line', label: 'AI摘要', bg: 'bg-background-100', iconColor: 'text-primary-600', path: '/courses' },
+    { icon: 'ri-magic-line', label: 'AI摘要', bg: 'bg-background-100', iconColor: 'text-primary-600', action: () => setShowSummaryList(true) },
     { icon: 'ri-book-open-line', label: '参考资料', bg: 'bg-background-100', iconColor: 'text-secondary-600', path: '/syllabus' },
+    { icon: 'ri-question-line', label: '使用说明', bg: 'bg-background-100', iconColor: 'text-foreground-500', path: '/help' },
   ];
 
   return (
     <div className="min-h-full bg-background-50">
+      {(live.running || live.starting) && (
+        <button
+          onClick={() => navigate('/record')}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-500 text-white text-sm font-semibold"
+        >
+          <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
+          {live.audioStalled ? '录音已中断 · 点此回到录音页' : '录音进行中 · 点此回到录音页'}
+        </button>
+      )}
       {/* Header */}
       <div className="px-5 md:px-8 pt-6 md:pt-8 pb-4 md:pb-6">
         <div className="flex items-center justify-between mb-4">
@@ -246,7 +264,7 @@ export default function MobileHomePage() {
             </div>
             <p className="text-xs text-foreground-400 mb-0.5">AI摘要</p>
             <p className="text-xl md:text-2xl font-bold text-foreground-900">
-              {stats ? <AnimatedNumber value={stats.totalSummaries} suffix="" /> : '-'}
+              {stats ? <AnimatedNumber value={isOffline ? stats.totalSummaries : summarySessions.length} suffix="" /> : '-'}
               <span className="text-xs font-normal text-foreground-400 ml-0.5">份</span>
             </p>
           </div>
@@ -275,7 +293,8 @@ export default function MobileHomePage() {
                   navigate('/login');
                   return;
                 }
-                navigate(action.path);
+                if (action.action) action.action();
+                else if (action.path) navigate(action.path);
               }}
               className="flex flex-col items-center gap-1.5 md:gap-2 cursor-pointer group"
             >
@@ -376,6 +395,8 @@ export default function MobileHomePage() {
         courses={distinctCourses}
         onSelect={(name) => { setShowCourseTypes(false); navigate('/course-detail?name=' + encodeURIComponent(name)); }}
       />
+
+      {showFiles && <ClassFileLibrary onClose={() => setShowFiles(false)} />}
 
       <AudioListModal
         isOpen={showAudioList}

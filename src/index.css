@@ -180,3 +180,6 @@ input, textarea, [contenteditable="true"] {
 * { scrollbar-width: none; -ms-overflow-style: none; }
 /* Utility class for top safe-area padding (use as needed) */
 .safe-top { padding-top: env(safe-area-inset-top); }
+/* Full-height pages inside MobileLayout: subtract the bottom nav (pb-24) and the status-bar inset. */
+.page-fill { height: calc(100dvh - 6rem - env(safe-area-inset-top)); }
+@media (min-width: 768px) { .page-fill { height: calc(100dvh - env(safe-area-inset-top)); } }

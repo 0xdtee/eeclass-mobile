@@ -26,10 +26,14 @@ function SummaryCard({
   session,
   tagLabels,
   onNavigate,
+  checked,
+  onToggle,
 }: {
   session: SessionItem;
   tagLabels: Record<string, string>;
   onNavigate: (sessionId: string, view: 'summary' | 'transcript') => void;
+  checked: boolean;
+  onToggle: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const hasSummary = session.summary && session.summary.trim().length > 0;
@@ -38,14 +42,21 @@ function SummaryCard({
     : '暂无摘要内容';
 
   return (
-    <div className="border-b border-background-100 last:border-b-0">
+    <div className={`border-b border-background-100 last:border-b-0 ${checked ? 'bg-accent-50/60' : ''}`}>
       <div className="px-5 py-4">
         {/* Header row */}
         <div className="flex items-start justify-between gap-3 mb-2">
           <div className="flex items-start gap-3 flex-1 min-w-0">
-            <div className="w-8 h-8 flex items-center justify-center bg-accent-100 rounded-lg flex-shrink-0 mt-0.5">
-              <i className="ri-magic-line text-accent-600 text-sm"></i>
-            </div>
+            {/* Tick to include in a batch export; the label pads the tap target */}
+            <label className="w-8 h-8 flex items-center justify-center flex-shrink-0 mt-0.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={onToggle}
+                className="accent-accent-500 w-4 h-4"
+                aria-label="勾选以批量导出"
+              />
+            </label>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-foreground-800 truncate">{session.title}</p>
               <div className="flex items-center gap-3 mt-0.5 text-xs text-foreground-400">
@@ -136,6 +147,10 @@ function SummaryCard({
 export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels }: SummaryListModalProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
+  const [picked, setPicked] = useState<string[]>([]);   // ids chosen for export
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportErr, setExportErr] = useState('');
 
   const filtered = sessions.filter((s) => {
     if (!search.trim()) return true;
@@ -146,6 +161,35 @@ export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels 
       s.tags.some((t) => (tagLabels[t] ?? t).toLowerCase().includes(q))
     );
   });
+
+  /** Export the ticked summaries (or, with none ticked, everything currently listed): one doc per class. */
+  const doExport = async (fmt: 'word' | 'pdf') => {
+    setExportOpen(false);
+    const chosen = picked.length ? filtered.filter((x) => picked.includes(x.id)) : filtered;
+    if (!chosen.length || exporting) return;
+    setExporting(true);
+    setExportErr('');
+    try {
+      const docs = chosen.map((s) => ({
+        title: s.title,
+        subtitle: [s.date, s.time, s.duration].filter(Boolean).join(' · '),
+        summary: s.summary,
+        keyPoints: s.keyPoints ?? [],
+      }));
+      if (fmt === 'word') {
+        // .docx has no batch container; emit them one after another
+        const { exportWord } = await import('@/lib/exportWord');
+        for (const d of docs) await exportWord(d);
+      } else {
+        const { exportPdfBatch } = await import('@/lib/exportPdf');
+        await exportPdfBatch(docs, '课堂摘要合集');
+      }
+    } catch (e) {
+      setExportErr(e instanceof Error ? e.message : '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleNavigate = (sessionId: string, view: 'summary' | 'transcript') => {
     onClose();
@@ -161,7 +205,7 @@ export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels 
     <Modal isOpen={isOpen} onClose={onClose} title="AI 摘要列表" width="max-w-2xl">
       <div className="flex flex-col" style={{ maxHeight: '70vh' }}>
         {/* Stats bar */}
-        <div className="flex items-center justify-between px-1 pb-4 border-b border-background-100 mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-4 border-b border-background-100 mb-3">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 flex items-center justify-center bg-accent-100 rounded-lg">
@@ -173,6 +217,34 @@ export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels 
               </div>
             </div>
           </div>
+          <div className="flex items-center gap-2">
+          {/* Export the ticked summaries, or all listed ones when none is ticked */}
+          <div className="relative">
+            <button
+              onClick={() => setExportOpen((v) => !v)}
+              disabled={filtered.length === 0 || exporting}
+              className="h-8 px-3 flex items-center gap-1.5 bg-accent-500 text-background-50 rounded-lg text-xs font-semibold disabled:opacity-40 whitespace-nowrap"
+            >
+              <i className={`${exporting ? 'ri-loader-4-line animate-spin' : 'ri-download-2-line'} text-sm`}></i>
+              {exporting ? '导出中…' : picked.length ? `导出 ${picked.length} 份` : '导出'}
+            </button>
+            {exportOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setExportOpen(false)} />
+                <div className="absolute left-0 sm:left-auto sm:right-0 top-full mt-2 z-20 w-48 bg-background-50 border border-background-200 rounded-xl shadow-lg p-2">
+                  <p className="px-2 pb-1 text-[11px] text-foreground-400">
+                    {picked.length ? `导出勾选的 ${picked.length} 份` : `未勾选,导出列表里全部 ${filtered.length} 份`}
+                  </p>
+                  <button onClick={() => void doExport('pdf')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-foreground-700 active:bg-background-100">
+                    <i className="ri-file-pdf-2-line text-foreground-400"></i>导出为 PDF
+                  </button>
+                  <button onClick={() => void doExport('word')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-foreground-700 active:bg-background-100">
+                    <i className="ri-file-word-2-line text-foreground-400"></i>导出为 Word
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           {/* Search */}
           <div className="relative">
             <div className="w-4 h-4 flex items-center justify-center absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
@@ -183,16 +255,26 @@ export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels 
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索摘要…"
-              className="h-8 pl-8 pr-3 w-44 bg-background-100 border border-background-200 rounded-lg text-xs text-foreground-700 placeholder:text-foreground-300 focus:outline-none focus:border-accent-400 focus:ring-1 focus:ring-accent-100 transition-all"
+              className="h-8 pl-8 pr-3 w-32 sm:w-44 bg-background-100 border border-background-200 rounded-lg text-xs text-foreground-700 placeholder:text-foreground-300 focus:outline-none focus:border-accent-400 focus:ring-1 focus:ring-accent-100 transition-all"
             />
+          </div>
           </div>
         </div>
 
-        {/* Tip row */}
-        <div className="flex items-center gap-2 px-1 mb-3">
+        {/* Tip + selection row */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 mb-3">
           <i className="ri-information-line text-foreground-300 text-xs"></i>
-          <p className="text-[11px] text-foreground-300">点击「查看纪要」进入摘要页，「查看原文」进入课堂转写页</p>
+          <p className="text-[11px] text-foreground-300">勾选左侧方框可批量导出;点「查看纪要」进入摘要页</p>
+          {filtered.length > 0 && (
+            <button
+              onClick={() => setPicked(picked.length === filtered.length ? [] : filtered.map((x) => x.id))}
+              className="ml-auto text-[11px] font-medium text-accent-600 whitespace-nowrap"
+            >
+              {picked.length === filtered.length ? '取消全选' : `全选 ${filtered.length} 份`}
+            </button>
+          )}
         </div>
+        {exportErr && <p className="px-1 mb-2 text-xs text-red-600">{exportErr}</p>}
 
         {/* Session list */}
         <div className="overflow-y-auto flex-1 -mx-6 px-0">
@@ -211,6 +293,9 @@ export default function SummaryListModal({ isOpen, onClose, sessions, tagLabels 
                   session={session}
                   tagLabels={tagLabels}
                   onNavigate={handleNavigate}
+                  checked={picked.includes(session.id)}
+                  onToggle={() => setPicked((p) =>
+                    p.includes(session.id) ? p.filter((x) => x !== session.id) : [...p, session.id])}
                 />
               ))
             )}

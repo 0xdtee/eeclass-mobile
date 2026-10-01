@@ -1,5 +1,5 @@
 /**
- * Local settings (localStorage) — AI default toggles / mic sensitivity / light-dark theme.
+ * Local settings (localStorage) — AI default toggles / mic sensitivity / translation / class material / light-dark theme.
  * All pure front-end persistence, no backend involved.
  */
 
@@ -27,24 +27,68 @@ export function setAiDefault(key: AiDefaultKey, on: boolean): void {
 }
 
 /* ---------------- Mic sensitivity (input gain) ---------------- */
+// The capture chain is gain -> limiter -> makeup -> soft clip, so the top of the range lifts a distant
+// lecturer instead of squaring off the waveform (plain clipping stopped helping past ~6x).
 const MIC_GAIN_KEY = 'eeclass_mic_gain';
-export const MIC_GAIN_MIN = 0.5;
-export const MIC_GAIN_MAX = 3.0;
-export const MIC_GAIN_DEFAULT = 1.0;
+const MIC_GAIN_MIGRATION = 'eeclass_mic_gain_default_v3';
+export const MIC_GAIN_MIN = 1;
+export const MIC_GAIN_MAX = 12;
+/** Classroom mics sit far from the lecturer, so full gain is the useful default. */
+export const MIC_GAIN_DEFAULT = MIC_GAIN_MAX;
 
-/** Read the mic gain, default 1.0, clamped to [0.5, 3.0]. */
+/** Read the mic gain, clamped to [1, 12]. Devices carrying the old 0.5–3 scale are lifted to the new default once. */
 export function getMicGain(): number {
   if (typeof window === 'undefined') return MIC_GAIN_DEFAULT;
-  const raw = localStorage.getItem(MIC_GAIN_KEY);
-  const n = raw == null ? MIC_GAIN_DEFAULT : parseFloat(raw);
-  if (!Number.isFinite(n)) return MIC_GAIN_DEFAULT;
-  return Math.max(MIC_GAIN_MIN, Math.min(MIC_GAIN_MAX, n));
+  try {
+    if (localStorage.getItem(MIC_GAIN_MIGRATION) !== '1') {
+      localStorage.setItem(MIC_GAIN_MIGRATION, '1');
+      localStorage.setItem(MIC_GAIN_KEY, String(MIC_GAIN_DEFAULT));
+      return MIC_GAIN_DEFAULT;
+    }
+    const raw = localStorage.getItem(MIC_GAIN_KEY);
+    const n = raw == null ? MIC_GAIN_DEFAULT : parseFloat(raw);
+    if (!Number.isFinite(n)) return MIC_GAIN_DEFAULT;
+    return Math.max(MIC_GAIN_MIN, Math.min(MIC_GAIN_MAX, n));
+  } catch {
+    return MIC_GAIN_DEFAULT;
+  }
 }
 
 export function setMicGain(n: number): void {
   if (typeof window === 'undefined') return;
   const clamped = Math.max(MIC_GAIN_MIN, Math.min(MIC_GAIN_MAX, n));
-  localStorage.setItem(MIC_GAIN_KEY, String(clamped));
+  try { localStorage.setItem(MIC_GAIN_KEY, String(clamped)); } catch { /* ignore */ }
+}
+
+/* ---------------- Live translation (source ⇄ target) ---------------- */
+// Off by default (from === to means off): most classes are taught in one language, and the extra subtitle
+// line only gets in the way until someone asks for it. The last choice is remembered on this device.
+const TRANSLATE_KEY = 'eeclass_translate_pair';
+
+export function getTranslatePair(): { from: string; to: string } {
+  try {
+    const v = JSON.parse(localStorage.getItem(TRANSLATE_KEY) || 'null') as { from?: string; to?: string } | null;
+    if (v && typeof v.from === 'string' && typeof v.to === 'string') return { from: v.from, to: v.to };
+  } catch { /* ignore */ }
+  return { from: 'zh', to: 'zh' };
+}
+
+export function setTranslatePair(from: string, to: string): void {
+  try { localStorage.setItem(TRANSLATE_KEY, JSON.stringify({ from, to })); } catch { /* ignore */ }
+}
+
+/* ---------------- Class material for summaries ---------------- */
+// How files from the class file library are folded into a summary: 'manual' asks which files to use
+// before generating; 'auto' lets the server match the library on its own.
+const MATERIAL_KEY = 'eeclass_material_mode';
+export type MaterialMode = 'manual' | 'auto';
+
+export function getMaterialMode(): MaterialMode {
+  try { return localStorage.getItem(MATERIAL_KEY) === 'auto' ? 'auto' : 'manual'; } catch { return 'manual'; }
+}
+
+export function setMaterialMode(m: MaterialMode): void {
+  try { localStorage.setItem(MATERIAL_KEY, m); } catch { /* ignore */ }
 }
 
 /* ---------------- Light/dark theme ---------------- */

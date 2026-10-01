@@ -3,6 +3,7 @@ import './i18n'
 import { createRoot } from 'react-dom/client'
 // Bundle icons and fonts locally (no CDN dependency; previously ri- icons showed blank because the font wasn't loaded)
 import 'remixicon/fonts/remixicon.css'
+import 'katex/dist/katex.min.css'
 import '@fontsource/inter/300.css'
 import '@fontsource/inter/400.css'
 import '@fontsource/inter/500.css'
