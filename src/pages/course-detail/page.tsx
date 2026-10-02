@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useSessions } from '@/hooks/useRecords';
 import { apiFetch, getServerUrl, getToken } from '@/lib/api';
 import BackButton from '@/components/feature/BackButton';
+import MathText from '@/components/base/MathText';
 
 // ── Types (aligned with backend /api/course/* responses) ──
 interface CourseSummary {
@@ -122,11 +123,22 @@ function Pie({ values, labels, selected, onSelect }: { values: number[]; labels:
 }
 
 export default function CourseDetailPage() {
-  const [sp] = useSearchParams();
+  const [sp, setSp] = useSearchParams();
   const name = sp.get('name') || '';
   const navigate = useNavigate();
   const { sessions } = useSessions();
-  const [tab, setTab] = useState<TabId>('summary');
+  // The active tab lives in the URL (?tab=), so coming back here (e.g. after opening a transcript from
+  // 录音集合) restores the same tab instead of resetting to 课程总结.
+  const [tab, setTabState] = useState<TabId>(() => {
+    const q = sp.get('tab') as TabId | null;
+    return q && TABS.some((x) => x.id === q) ? q : 'summary';
+  });
+  const setTab = useCallback((id: TabId) => {
+    setTabState(id);
+    setSp((prev) => { const n = new URLSearchParams(prev); n.set('tab', id); return n; }, { replace: true });
+  }, [setSp]);
+  const [mockExportOpen, setMockExportOpen] = useState(false);
+  const [mockExporting, setMockExporting] = useState(false);
   const [summary, setSummary] = useState<CourseSummary | null>(null);
   const [exam, setExam] = useState<CourseExam | null>(null);
   const [mock, setMock] = useState<CourseMock | null>(null);
@@ -153,6 +165,26 @@ export default function CourseDetailPage() {
     setPlayingKey(key);
   }, []);
 
+  /** Export the mock exam paper (numbered questions first, then the answer key) as Word or PDF */
+  const exportMock = useCallback(async (fmt: 'word' | 'pdf') => {
+    setMockExportOpen(false);
+    if (!mock?.questions?.length) return;
+    setMockExporting(true);
+    try {
+      const doc = {
+        title: `《${name}》模拟试卷`,
+        subtitle: `共 ${mock.questions.length} 题 · 由「课堂实时字幕」生成`,
+        questions: mock.questions,
+      };
+      if (fmt === 'word') await (await import('@/lib/exportWord')).exportWord(doc);
+      else await (await import('@/lib/exportPdf')).exportPdf(doc);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '导出失败');
+    } finally {
+      setMockExporting(false);
+    }
+  }, [mock, name]);
+
   const courseSessions = useMemo(
     () => sessions.filter((s) => baseName(s.title) === name),
     [sessions, name]
@@ -161,6 +193,7 @@ export default function CourseDetailPage() {
   const loadTab = useCallback(
     async (t: TabId, opts: { refresh?: boolean; aiOnly?: boolean } = {}) => {
       const { refresh = false, aiOnly = false } = opts;
+      if (!name) return;   // opened without a course: the request would only 400
       setErr('');
       const body = JSON.stringify({ name, refresh, ai_only: aiOnly });
       try {
@@ -279,7 +312,7 @@ export default function CourseDetailPage() {
         {tab === 'summary' && (loading && (!summary || summary.no_transcript) ? Spinner : summary && !summary.no_transcript && (
           <div className="space-y-4">
             <div className="bg-background-50 border border-background-200 rounded-2xl p-5">
-              <p className="text-sm leading-relaxed text-foreground-700 whitespace-pre-wrap">{summary.summary}</p>
+              <p className="text-sm leading-relaxed text-foreground-700 whitespace-pre-wrap"><MathText text={summary.summary} /></p>
             </div>
             {summary.key_points?.length > 0 && (
               <div id="sum-keypoints" className={`bg-background-50 border rounded-2xl p-5 transition-all ${highlightCh === -1 ? 'border-accent-400 ring-2 ring-accent-200' : 'border-background-200'}`}>
@@ -288,7 +321,7 @@ export default function CourseDetailPage() {
                   {summary.key_points.map((p, i) => (
                     <div key={i} className="flex items-start gap-3 p-3 bg-background-100 rounded-xl">
                       <span className="w-6 h-6 flex items-center justify-center flex-shrink-0 bg-accent-500 text-background-50 rounded-full text-xs font-bold">{i + 1}</span>
-                      <p className="text-sm text-foreground-700 pt-0.5">{p}</p>
+                      <p className="text-sm text-foreground-700 pt-0.5"><MathText text={p} /></p>
                     </div>
                   ))}
                 </div>
@@ -300,7 +333,7 @@ export default function CourseDetailPage() {
                 <ul className="space-y-1.5">
                   {ch.points?.map((pt, j) => (
                     <li key={j} className="flex items-start gap-2 text-sm text-foreground-600">
-                      <span className="w-1.5 h-1.5 rounded-full bg-accent-400 mt-2 flex-shrink-0"></span>{pt}
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent-400 mt-2 flex-shrink-0"></span><span><MathText text={pt} /></span>
                     </li>
                   ))}
                 </ul>
@@ -369,7 +402,7 @@ export default function CourseDetailPage() {
                   </div>
                   <p className="text-xs text-foreground-500 mb-3 leading-relaxed"><i className="ri-lightbulb-line mr-1 text-amber-500"></i>{exam.points[sel].reason}</p>
                   <div className="border-t border-background-100 pt-3">
-                    <p className="text-sm text-foreground-700 leading-relaxed whitespace-pre-wrap">{exam.points[sel].detail}</p>
+                    <p className="text-sm text-foreground-700 leading-relaxed whitespace-pre-wrap"><MathText text={exam.points[sel].detail} /></p>
                   </div>
                   <button
                     onClick={() => { setJumpTarget(exam.points[sel].name); setTab('summary'); }}
@@ -416,6 +449,29 @@ export default function CourseDetailPage() {
               <i className="ri-file-list-3-line text-accent-600"></i>
               <h3 className="text-sm font-semibold text-foreground-800 flex-1 min-w-0 truncate">《{name}》模拟试卷</h3>
               <span className="text-xs text-foreground-400 flex-shrink-0">共 {mock.questions.length} 题</span>
+              <div className="relative flex-shrink-0">
+                <button
+                  onClick={() => setMockExportOpen((v) => !v)}
+                  disabled={mockExporting}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-accent-500 text-background-50 rounded-full text-xs font-semibold disabled:opacity-50 whitespace-nowrap"
+                >
+                  <i className={mockExporting ? 'ri-loader-4-line animate-spin' : 'ri-download-2-line'}></i>导出
+                </button>
+                {mockExportOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setMockExportOpen(false)} />
+                    <div className="absolute right-0 top-full mt-2 z-20 w-40 bg-background-50 border border-background-200 rounded-xl shadow-lg p-1.5">
+                      <button onClick={() => void exportMock('word')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-foreground-700 active:bg-background-100">
+                        <i className="ri-file-word-2-line text-foreground-400"></i>导出为 Word
+                      </button>
+                      <button onClick={() => void exportMock('pdf')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-foreground-700 active:bg-background-100">
+                        <i className="ri-file-pdf-2-line text-foreground-400"></i>导出为 PDF
+                      </button>
+                      <p className="px-3 pt-1 pb-1 text-[11px] text-foreground-400">题目在前,参考答案在后</p>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
             {mock.questions.map((q, i) => (
               <div key={i} className="space-y-1.5">
@@ -423,11 +479,11 @@ export default function CourseDetailPage() {
                   <span className="text-xs font-bold text-accent-600 mt-0.5 flex-shrink-0">{i + 1}.</span>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground-800">
-                      <span className="text-[11px] text-foreground-400 mr-1.5">[{q.type}]</span>{q.question}
+                      <span className="text-[11px] text-foreground-400 mr-1.5">[{q.type}]</span><MathText text={q.question} />
                     </p>
                     <details className="mt-1.5">
                       <summary className="text-xs text-accent-600 cursor-pointer hover:text-accent-700 select-none">查看答案</summary>
-                      <p className="text-xs text-foreground-600 mt-1 p-2.5 bg-background-100 rounded-lg leading-relaxed whitespace-pre-wrap">{q.answer}</p>
+                      <p className="text-xs text-foreground-600 mt-1 p-2.5 bg-background-100 rounded-lg leading-relaxed whitespace-pre-wrap"><MathText text={q.answer} /></p>
                     </details>
                   </div>
                 </div>

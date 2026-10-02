@@ -17,7 +17,8 @@ function adaptSession(s: Record<string, unknown>): SessionRecord {
   return {
     sid,
     title: titleOf(sid, s.title as string | undefined),
-    date: sid.slice(0, 10),
+    // a recording started from a timetable lesson belongs to that lesson's day, even if made early
+    date: (s.sched_date as string) || sid.slice(0, 10),
     duration: fmtDuration(s.duration_s as number),
     course_id: s.course_id as string | undefined,
     tags: (s.tags as string[]) || [],
@@ -44,7 +45,11 @@ export interface TranscriptionLine {
   start: number;
   end: number;
   speaker: string;
+  speaker_id?: number;
   text: string;
+  /** Highlight: key point (yellow) / definition (green), from live rules, manual marks or 一键标注 */
+  kind?: 'key' | 'define' | null;
+  translation?: string;
 }
 
 export interface SessionDetail {
@@ -154,20 +159,32 @@ export function useSessions() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const fetchAll = useCallback(async () => {
+  /** Returns the fresh list as well as storing it, so a caller can decide on it without waiting for a render. */
+  const fetchAll = useCallback(async (): Promise<SessionRecord[]> => {
     setLoading(true);
     setError('');
     try {
       const data = await apiFetch<{ sessions: Record<string, unknown>[] }>('/api/sessions');
-      setSessions((data.sessions || []).map(adaptSession));
+      const list = (data.sessions || []).map(adaptSession);
+      setSessions(list);
+      return list;
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败');
+      return [];
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // A list left open goes stale: a class recorded meanwhile on another device would be invisible here.
+  // Refresh whenever the app comes back to the foreground.
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') void fetchAll(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [fetchAll]);
 
   return { sessions, loading, error, refresh: fetchAll };
 }
@@ -213,7 +230,10 @@ export function useSessionDetail(sid: string | null) {
           start: (l.start as number) || 0,
           end: (l.end as number) || 0,
           speaker: (l.speaker as string) || '',
+          speaker_id: l.speaker_id as number | undefined,
           text: (l.text as string) || '',
+          kind: (l.kind as 'key' | 'define' | null) ?? null,
+          translation: (l.translation as string) || undefined,
         })),
         summary, key_points, corrections, applied, shots,
       });
@@ -393,4 +413,21 @@ export async function fetchShots(sid: string) {
 
 export async function deleteShot(sid: string, shotId: string) {
   return apiFetch(`/api/shot/${sid}/${shotId}`, { method: 'DELETE' });
+}
+// Highlights
+/** Manually mark a line as key point / definition, or clear it (null). Stored server-side, merged into the transcript. */
+export async function markLine(sid: string, lineId: number, kind: 'key' | 'define' | null) {
+  return apiFetch<{ ok: boolean }>(`/api/transcript/${encodeURIComponent(sid)}/mark`, {
+    method: 'POST',
+    body: JSON.stringify({ line_id: lineId, kind }),
+  });
+}
+
+/** Post-class one-click highlighting: the AI reads the whole transcript and marks the definitions / key points
+ *  the live rules missed. Re-running replaces its previous set; manual marks are kept. */
+export async function autoHighlight(sid: string) {
+  return apiFetch<{ ok: boolean; added: number; define: number; key: number }>(
+    `/api/transcript/${encodeURIComponent(sid)}/autohighlight`,
+    { method: 'POST' },
+  );
 }

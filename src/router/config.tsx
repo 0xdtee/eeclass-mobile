@@ -22,6 +22,7 @@ import VoiceprintsPage from "../pages/voiceprints/page";
 import SyllabusPage from "../pages/syllabus/page";
 import CourseDetailPage from "../pages/course-detail/page";
 import HelpPage from "../pages/help/page";
+import MeetingPage from "../pages/meeting/page";
 
 // Existing pages
 import TagsPage from "../pages/tags/page";
@@ -67,6 +68,8 @@ const routes: RouteObject[] = [
       { path: "/syllabus", element: <SyllabusPage /> },
       { path: "/tags", element: <TagsPage /> },
       { path: "/help", element: <HelpPage /> },
+      // inside MobileLayout on purpose: the class-recording session lives there and must survive this page
+      { path: "/meeting", element: <MeetingPage /> },
     ],
   },
   {

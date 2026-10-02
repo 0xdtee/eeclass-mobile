@@ -7,8 +7,8 @@
 import { useCallback, useEffect, useRef, useState, createContext, useContext, createElement } from 'react';
 import type { ReactNode } from 'react';
 import { useAuth } from '@/hooks/useAuth';
-import { getServerUrl, getToken, clearToken } from '@/lib/api';
-import { getMicGain } from '@/lib/settings';
+import { getServerUrl, getToken, clearToken, apiFetch } from '@/lib/api';
+import { getMicGain, setMicGain, MIC_GAIN_MAX } from '@/lib/settings';
 
 export { getServerUrl, getToken };
 
@@ -66,6 +66,8 @@ export interface AiSummary {
 
 export interface StartOptions {
   title?: string | null;
+  /** Date (yyyy-mm-dd) of the timetable lesson this recording belongs to, when started from the schedule */
+  forDate?: string | null;
   sensitivity?: 'std' | 'high' | 'max';
   model?: 'sensevoice' | 'paraformer' | 'stream' | 'aliyun' | 'aliyun_wu' | 'aliyun_multi';
   aiCorrect?: boolean;
@@ -83,6 +85,24 @@ const SENS: Record<string, { threshold: number; exit_threshold: number; min_spee
   max: { threshold: 0.3, exit_threshold: 0.2, min_speech_ms: 150 },
 };
 
+/** Highest pickup gain offered. Safe to sit at because of the limiter + soft clip in the capture chain. */
+export const MAX_GAIN = MIC_GAIN_MAX;
+
+/**
+ * Saturate instead of clip. Below 0.7 the sample is untouched; above it the curve bends smoothly
+ * toward ±1. Hard clipping squares off the waveform and the recognizer hears distortion, which is
+ * why simply raising the gain used to stop helping past ~6×.
+ */
+export function softClip(x: number): number {
+  const a = Math.abs(x);
+  if (a <= 0.7) return x;
+  return Math.sign(x) * (0.7 + 0.3 * Math.tanh((a - 0.7) / 0.3));
+}
+
+/** A few milliseconds of silence, looped to hold an active media session while recording. */
+const SILENT_LOOP =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQQAAAAAAAAA';
+
 const EMPTY_STATUS: LiveStatus = { elapsed: 0, level: 0, backlog: 0, rtf: 0, lines: 0, speakers: [] };
 const TARGET_SR = 16000;
 
@@ -90,11 +110,11 @@ const TARGET_SR = 16000;
 // ~64ms chunks to the main thread. On iOS this avoids the dropped buffers + latency that ScriptProcessor
 // (main-thread, throttled under UI load) suffers from. Built once as a Blob module URL.
 let _captureWorkletUrl: string | null = null;
-function captureWorkletUrl(): string {
+export function captureWorkletUrl(): string {
   if (_captureWorkletUrl) return _captureWorkletUrl;
   const code = `
 class DsCapture extends AudioWorkletProcessor {
-  constructor(o){ super(); const p=(o&&o.processorOptions)||{}; this.ratio=sampleRate/(p.targetSr||16000); this.gain=p.gain||1; this.frac=0; this.buf=[]; }
+  constructor(o){ super(); const p=(o&&o.processorOptions)||{}; this.ratio=sampleRate/(p.targetSr||16000); this.frac=0; this.buf=[]; }
   process(inputs){
     const ch = inputs[0] && inputs[0][0];
     if(!ch) return true;
@@ -102,8 +122,8 @@ class DsCapture extends AudioWorkletProcessor {
     for(; pos<ch.length; pos+=this.ratio){
       const i0=Math.floor(pos), f=pos-i0;
       const nx=(i0+1<ch.length)?ch[i0+1]:ch[i0];
-      let s=(ch[i0]*(1-f)+nx*f)*this.gain;
-      s=s<-1?-1:(s>1?1:s);
+      let s=ch[i0]*(1-f)+nx*f; const a=s<0?-s:s;
+      if(a>0.7) s=(s<0?-1:1)*(0.7+0.3*Math.tanh((a-0.7)/0.3));   // soft clip, same curve as softClip()
       this.buf.push(s*32767);
     }
     this.frac=pos-ch.length;                 // carry the fractional read position into the next block
@@ -139,6 +159,49 @@ function useLiveCaptionState(enabled: boolean) {
   const [liveSid, setLiveSid] = useState('');
   const [micActive, setMicActive] = useState(false);
   const [deepseekReady, setDeepseekReady] = useState(false);
+  // Pickup gain, adjustable live while recording (the slider moves the running gain node).
+  const [gain, setGainState] = useState<number>(() => getMicGain());
+  const gainRef = useRef(gain);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const setGain = useCallback((v: number) => {
+    setMicGain(v);
+    const g = getMicGain();
+    gainRef.current = g;
+    setGainState(g);
+    if (gainNodeRef.current) gainNodeRef.current.gain.value = g;
+  }, []);
+  // Phones/tablets suspend the AudioContext when the page goes to the background or the screen locks:
+  // the socket stays open, so the UI would claim it is still recording while no audio is captured at all.
+  // Track when audio last actually flowed and surface a stall.
+  const lastAudioRef = useRef(0);
+  const [audioStalled, setAudioStalled] = useState(false);
+  // A silent looping track: while it plays the OS treats this page as an active media session, which keeps
+  // it alive in the background far longer. It cannot defeat iOS's rule that only native apps capture audio
+  // with the screen locked, but it covers app-switching.
+  const keepAliveRef = useRef<HTMLAudioElement | null>(null);
+  const startKeepAlive = useCallback(() => {
+    if (keepAliveRef.current) return;
+    try {
+      const a = new Audio(SILENT_LOOP);
+      a.loop = true;
+      a.volume = 0.001;          // not 0: some browsers treat a muted element as "not playing"
+      (a as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+      void a.play().catch(() => {});
+      keepAliveRef.current = a;
+      const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
+      if (ms && 'MediaMetadata' in window) {
+        ms.metadata = new MediaMetadata({ title: '课堂录音进行中', artist: 'eeclass' });
+        ms.playbackState = 'playing';
+      }
+    } catch { /* keep-alive is best effort */ }
+  }, []);
+  const stopKeepAlive = useCallback(() => {
+    const a = keepAliveRef.current;
+    keepAliveRef.current = null;
+    try { a?.pause(); } catch { /* ignore */ }
+    const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
+    if (ms) ms.playbackState = 'none';
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -149,6 +212,8 @@ function useLiveCaptionState(enabled: boolean) {
   // control commands issued before the socket finished connecting (e.g. a fast tap on record):
   // queue them and flush on open, so 'start' is never silently dropped.
   const pendingRef = useRef<Record<string, unknown>[]>([]);
+  // the class this start continues (append), so 'started' knows to bring back what it already holds
+  const appendRef = useRef<string | null>(null);
 
   const send = useCallback((msg: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -164,6 +229,7 @@ function useLiveCaptionState(enabled: boolean) {
     try { m.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
     try { void m.ctx.close(); } catch { /* ignore */ }
     micRef.current = null;
+    gainNodeRef.current = null;
     setMicActive(false);
   }, []);
 
@@ -192,14 +258,30 @@ function useLiveCaptionState(enabled: boolean) {
     lp.type = 'lowpass';
     lp.frequency.value = 7600;
     src.connect(lp);
-    // Fixed LINEAR boost (no compressor / no AGC): raises the level so quiet/distant/loudspeaker audio reaches
-    // the ASR VAD, while preserving the natural per-speaker dynamics diarization relies on. The worklet clamps
-    // any clipping. If it clips too much on close/loud speech, lower this or use the 拾音灵敏度 setting.
-    const boost = ctx.createGain();
-    boost.gain.value = 3.0;
-    lp.connect(boost);
-    const gain = getMicGain();               // mic sensitivity, read once at capture start
+    // Pickup gain -> limiter -> makeup. The limiter is what makes high gain usable: it rounds off the peaks
+    // instead of letting them square off against the ±1 ceiling, so a distant lecturer can be lifted without
+    // turning the loud parts to mush. The gain node is live-adjustable from the recording screen.
+    gainRef.current = getMicGain();          // pick up a change made in 我的 → 拾音灵敏度 since the last start
+    setGainState(gainRef.current);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = gainRef.current;
+    gainNodeRef.current = gainNode;
+    lp.connect(gainNode);
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -24;
+    limiter.knee.value = 24;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.15;
+    // DynamicsCompressorNode only ever attenuates, so without makeup the chain would end up quieter. These
+    // numbers were swept against the real node in a browser (desktop eeclass): the loudest combination that
+    // still leaves ~0% of samples flat-topped at near, medium and far speaking distance.
+    const makeup = ctx.createGain();
+    makeup.gain.value = 2;
+    gainNode.connect(limiter);
+    limiter.connect(makeup);
     const send = (buf: ArrayBuffer) => {
+      lastAudioRef.current = Date.now();
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(buf);
     };
@@ -210,7 +292,7 @@ function useLiveCaptionState(enabled: boolean) {
     try {
       // Preferred: AudioWorklet (realtime thread) — no dropped audio / added latency on iOS.
       await ctx.audioWorklet.addModule(captureWorkletUrl());
-      const wnode = new AudioWorkletNode(ctx, 'ds-capture', { processorOptions: { targetSr: TARGET_SR, gain } });
+      const wnode = new AudioWorkletNode(ctx, 'ds-capture', { processorOptions: { targetSr: TARGET_SR } });
       wnode.port.onmessage = (e) => send(e.data as ArrayBuffer);
       node = wnode;
     } catch {
@@ -218,6 +300,7 @@ function useLiveCaptionState(enabled: boolean) {
       const sp = ctx.createScriptProcessor(4096, 1, 1);
       const ratio = ctx.sampleRate / TARGET_SR;
       sp.onaudioprocess = (e) => {
+        lastAudioRef.current = Date.now();
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         const input = e.inputBuffer.getChannelData(0);
         const outLen = Math.floor(input.length / ratio);
@@ -226,17 +309,19 @@ function useLiveCaptionState(enabled: boolean) {
           const pos = i * ratio;
           const i0 = Math.floor(pos);
           const frac = pos - i0;
-          const s = (input[i0] * (1 - frac) + (input[i0 + 1] ?? input[i0]) * frac) * gain;
-          pcm[i] = Math.max(-1, Math.min(1, s)) * 32767;
+          const s = input[i0] * (1 - frac) + (input[i0 + 1] ?? input[i0]) * frac;
+          pcm[i] = softClip(s) * 32767;
         }
         send(pcm.buffer);
       };
       node = sp;
     }
-    boost.connect(node);
+    makeup.connect(node);
     node.connect(mute);
     mute.connect(ctx.destination);
     micRef.current = { ctx, stream, node };
+    lastAudioRef.current = Date.now();
+    setAudioStalled(false);
     setMicActive(true);
   }, []);
 
@@ -256,12 +341,38 @@ function useLiveCaptionState(enabled: boolean) {
     wakeLockRef.current = null;
   }, []);
 
+  /** Bring back what a class already holds (after the app was relaunched mid-recording, or when continuing a
+   *  class): fetch its transcript and merge it with whatever lines arrived meanwhile, deduped by id. */
+  const loadExisting = useCallback(async (sid: string) => {
+    if (!sid) return;
+    try {
+      const t = await apiFetch<{ lines: Record<string, unknown>[] }>(`/api/transcript/${encodeURIComponent(sid)}`);
+      const old = (t.lines || []).map((l) => ({
+        id: l.id as number, ts: (l.ts as string) || '', start: (l.start as number) || 0, end: (l.end as number) || 0,
+        speaker: (l.speaker as string) || '', speaker_id: (l.speaker_id as number) ?? 0, text: (l.text as string) || '',
+        kind: (l.kind as 'key' | 'define' | null) ?? null, new_para: !!l.new_para,
+        translation: (l.translation as string) || undefined,
+      }) as CaptionLine);
+      setLines((prev) => {
+        const byId = new Map<number, CaptionLine>();
+        [...old, ...prev].forEach((l) => byId.set(l.id, l));
+        return [...byId.values()].sort((a, b) => a.id - b.id);
+      });
+    } catch { /* the live lines still show; the class page has the full transcript */ }
+  }, []);
+
   /* ---------- WebSocket ---------- */
   const connect = useCallback(() => {
     if (!aliveRef.current) return;
     const token = getToken();
+    // No token yet (login / registration). Connecting anonymously only makes the server count failed
+    // authentications and eventually lock this address out of signing up, so wait for a token instead.
+    if (!token) {
+      retryRef.current = setTimeout(connect, 2000);
+      return;
+    }
     const params = new URLSearchParams();
-    if (token) params.set('token', token);
+    params.set('token', token);
     params.set('cid', getCid());
     let ws: WebSocket;
     try {
@@ -299,11 +410,15 @@ function useLiveCaptionState(enabled: boolean) {
       switch (m.type) {
         case 'hello':
           if (m.resumed) {
+            // The app came back (often relaunched by iOS) while its class was still recording on the server.
             setRunning(true); setStarting(false);
-            if (m.sid) setLiveSid(m.sid as string);
+            if (m.sid) { setLiveSid(m.sid as string); void loadExisting(m.sid as string); }
             recordingRef.current = true;
-            void startMic();
-            setNotice('已恢复录制');
+            // iOS often refuses the mic until the user taps: say so instead of claiming it resumed, and offer
+            // 「重新接上麦克风」 -- the old silence let the class record nothing until the server ended it.
+            startMic()
+              .then(() => setNotice('已恢复录制'))
+              .catch(() => setNotice('麦克风没能自动接上(系统要求点一下),请点「重新接上麦克风」继续录这节课'));
           } else {
             setRunning(!!m.running);
           }
@@ -314,7 +429,9 @@ function useLiveCaptionState(enabled: boolean) {
           setLines([]); setPartial('');
           setLastDir((m.dir as string) || '');
           setLiveSid((m.sid as string) || '');
-          setNotice('已开始录制');
+          setNotice(appendRef.current ? '接着这节课继续录音' : '已开始录制');
+          if (appendRef.current && m.sid) void loadExisting(m.sid as string);
+          appendRef.current = null;
           break;
         case 'stopped':
           recordingRef.current = false;
@@ -363,7 +480,7 @@ function useLiveCaptionState(enabled: boolean) {
         case 'error': setError((m.msg as string) || ''); setStarting(false); stopMic(); break;
       }
     };
-  }, [stopMic, startMic]);
+  }, [stopMic, startMic, loadExisting]);
 
   useEffect(() => {
     if (!enabled) return;                 // only hold the socket/mic open while signed in
@@ -378,16 +495,53 @@ function useLiveCaptionState(enabled: boolean) {
   }, [enabled, connect, stopMic]);
 
   useEffect(() => {
-    if (running) void requestWakeLock(); else releaseWakeLock();
-  }, [running, requestWakeLock, releaseWakeLock]);
+    if (running) { void requestWakeLock(); startKeepAlive(); }
+    else { releaseWakeLock(); stopKeepAlive(); }
+  }, [running, requestWakeLock, releaseWakeLock, startKeepAlive, stopKeepAlive]);
+  // Going to the background releases the wake lock; re-request it on return while still recording, and
+  // resume the AudioContext the system suspended while we were away.
   useEffect(() => {
-    const onVis = () => { if (document.visibilityState === 'visible' && recordingRef.current) void requestWakeLock(); };
+    const onVis = () => {
+      if (document.visibilityState !== 'visible' || !recordingRef.current) return;
+      void requestWakeLock();
+      const mic = micRef.current;
+      if (mic && mic.ctx.state !== 'running') {
+        void mic.ctx.resume().then(() => { lastAudioRef.current = Date.now(); }).catch(() => {});
+      }
+    };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [requestWakeLock]);
 
+  // Watch that audio is actually flowing. Phones suspend capture in the background even though the socket
+  // stays open, which would otherwise look exactly like a healthy recording. A tab left in the background
+  // long enough has its mic track ended outright; once the page is visible again, reopen the mic.
+  useEffect(() => {
+    if (!running) { setAudioStalled(false); return; }
+    let reopening = false;
+    const id = window.setInterval(() => {
+      const mic = micRef.current;
+      if (!mic) return;
+      const gap = Date.now() - lastAudioRef.current;
+      const suspended = mic.ctx.state !== 'running';
+      if (suspended) void mic.ctx.resume().catch(() => {});
+      setAudioStalled(gap > 4000 || suspended);
+      const dead = mic.stream.getAudioTracks().every((tr) => tr.readyState === 'ended' || !tr.enabled);
+      if (!reopening && document.visibilityState === 'visible' && (dead || gap > 15000)) {
+        reopening = true;
+        stopMic();
+        startMic()
+          .then(() => setNotice('麦克风已断开,已自动重新接上'))
+          .catch(() => setNotice('麦克风已断开,且无法自动恢复,请点「重新接上麦克风」'))
+          .finally(() => { reopening = false; });
+      }
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [running, startMic, stopMic]);
+
   const start = useCallback(async (opts: StartOptions = {}) => {
     setStarting(true); setError(''); setLines([]); setPartial('');
+    appendRef.current = opts.appendSid || null;
     try {
       await startMic();
     } catch (e) {
@@ -412,10 +566,11 @@ function useLiveCaptionState(enabled: boolean) {
       streaming: model === 'stream',
       ai_correct: !!opts.aiCorrect,
       smart_seg: opts.smartSeg !== false,
-      translate_from: opts.translateFrom ?? 'en',   // live translation source (原文)
+      translate_from: opts.translateFrom ?? 'zh',   // live translation source (原文)
       translate_to: opts.translateTo ?? 'zh',       // live translation target (译文); off when equal
       subjects: opts.subjects ?? [],
       append_sid: opts.appendSid ?? null,
+      for_date: opts.forDate || null,   // started from a timetable lesson -> file it under that lesson's day
     });
   }, [send, startMic]);
 
@@ -430,11 +585,17 @@ function useLiveCaptionState(enabled: boolean) {
   const rename = useCallback((id: number, name: string) => send({ cmd: 'rename', id, name }), [send]);
 
   const summarize = useCallback(
-    async (title?: string, which?: { ts: string; speaker: string; text: string }[], sid?: string): Promise<AiSummary> => {
+    async (title?: string, which?: { ts: string; speaker: string; text: string }[], sid?: string,
+           mat?: { fileIds?: string[]; auto?: boolean }): Promise<AiSummary> => {
       const r = await fetch(getServerUrl() + '/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Token': getToken() },
-        body: JSON.stringify({ title, lines: which ?? lines, dir: lastDir || undefined, sid: sid || liveSid || undefined }),
+        body: JSON.stringify({
+          title, lines: which ?? lines, dir: lastDir || undefined, sid: sid || liveSid || undefined,
+          // class material: explicit picks (manual mode) or auto-match against the class file library
+          file_ids: mat?.fileIds && mat.fileIds.length ? mat.fileIds : undefined,
+          auto: mat?.auto || undefined,
+        }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error((j as { error?: string }).error || `HTTP ${r.status}`);
@@ -443,10 +604,21 @@ function useLiveCaptionState(enabled: boolean) {
     [lines, lastDir, liveSid]
   );
 
+  // Reopen the mic from a tap (iOS only grants it on a user gesture). Keeps recording the same class --
+  // the old advice was to end and start again, which is exactly what split one class into two.
+  const reopenMic = useCallback(() => {
+    stopMic();
+    startMic()
+      .then(() => setNotice('麦克风已重新接上,继续录这节课'))
+      .catch((e) => setNotice('麦克风还是打不开:' + (e instanceof Error ? e.message : String(e))));
+  }, [startMic, stopMic]);
+  // Recording, but no mic open: nothing is being captured (the stall watcher only sees an OPEN mic).
+  const micLost = running && !paused && !starting && !micActive;
+
   return {
     connected, authFailed, running, paused, starting, micActive, deepseekReady,
-    lines, partial, status, notice, error, lastDir, liveSid,
-    start, stop, setPaused: setPausedCmd, mark, rename, summarize,
+    lines, partial, status, notice, error, lastDir, liveSid, audioStalled, gain, setGain,
+    start, stop, setPaused: setPausedCmd, mark, rename, summarize, micLost, reopenMic,
   };
 }
 

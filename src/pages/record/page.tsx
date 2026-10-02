@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useLiveCaption } from '@/hooks/useLiveCaption';
-import { getAiDefault } from '@/lib/settings';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLiveCaption, MAX_GAIN } from '@/hooks/useLiveCaption';
+import { getAiDefault, getTranslatePair, setTranslatePair } from '@/lib/settings';
 import { TRANS_LANGS, type TransLang } from '@/lib/translateLangs';
+import ClassFileLibrary from '@/components/feature/ClassFileLibrary';
 
 // Default subject tags from the national syllabus (ticked to give AI subject context for correction/translation)
 const NATIONAL_TAGS = [
@@ -29,13 +30,22 @@ let lastAutoNavSid = '';
 
 export default function RecordPage() {
   const navigate = useNavigate();
+  const [sp] = useSearchParams();
   const live = useLiveCaption();
-  const [title, setTitle] = useState(defaultTitle());
+  // Opened from a timetable lesson (?title=&for_date=): name the recording after it and file it under that
+  // lesson's day, so a recording started a little early still belongs to that class.
+  const forDate = sp.get('for_date') || '';
+  // Opened from a class's 「继续录这节课」 (?append=<sid>): record onto that class instead of starting a new one
+  const appendSid = sp.get('append') || '';
+  const [title, setTitle] = useState(() => sp.get('title') || defaultTitle());
+  const [showCourseware, setShowCourseware] = useState(false);
   const [aiCorrect, setAiCorrect] = useState(() => getAiDefault('aiCorrect'));
   const [smartSeg, setSmartSeg] = useState(() => getAiDefault('smartSeg'));
   const [model, setModel] = useState<'aliyun' | 'aliyun_wu' | 'aliyun_multi'>('aliyun');
-  const [translateFrom, setTranslateFrom] = useState<TransLang>('en');   // source (原文); off when from === to
-  const [translateTo, setTranslateTo] = useState<TransLang>('zh');       // target (译文)
+  // Live translation, off by default (from === to); the last choice is remembered on this device
+  const [translateFrom, setTranslateFrom] = useState<TransLang>(() => getTranslatePair().from as TransLang);   // source (原文)
+  const [translateTo, setTranslateTo] = useState<TransLang>(() => getTranslatePair().to as TransLang);         // target (译文)
+  useEffect(() => { setTranslatePair(translateFrom, translateTo); }, [translateFrom, translateTo]);
   const [subjects, setSubjects] = useState<string[]>([]);
   const [showTags, setShowTags] = useState(false);
   const [justSaved, setJustSaved] = useState<string>('');
@@ -61,7 +71,10 @@ export default function RecordPage() {
 
   const onStart = () => {
     setJustSaved('');
-    void live.start({ title: title.trim() || defaultTitle(), aiCorrect, smartSeg, model, translateFrom, translateTo, subjects });
+    void live.start({
+      title: title.trim() || defaultTitle(), aiCorrect, smartSeg, model, translateFrom, translateTo, subjects,
+      forDate: forDate || null, appendSid: appendSid || null,
+    });
   };
 
   const toggleTag = (t: string) =>
@@ -101,6 +114,35 @@ export default function RecordPage() {
             </div>
             <span className="text-xs text-foreground-400">{live.status.lines} 句</span>
           </div>
+          {/* Phones suspend capture when the app is backgrounded or the screen locks, while the socket stays up;
+              after iOS relaunches the app mid-class the mic may not be open at all until the user taps. */}
+          {(live.micLost || live.audioStalled) && (
+            <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl">
+              <i className="ri-error-warning-fill text-amber-500"></i>
+              <p className="flex-1 text-xs text-amber-700 leading-relaxed">
+                {live.micLost
+                  ? '麦克风没接上,现在没在录音。点右边按钮接着录这节课(不会新开一节)。'
+                  : '录音已中断 —— 请保持本页面在前台、屏幕常亮。'}
+              </p>
+              <button onClick={live.reopenMic}
+                className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-full bg-amber-500 text-white text-xs font-semibold">
+                <i className="ri-mic-line"></i>重新接上麦克风
+              </button>
+            </div>
+          )}
+          {live.notice && live.notice.startsWith('麦克风') && (
+            <p className="mt-2 text-xs text-foreground-500"><i className="ri-information-line mr-1"></i>{live.notice}</p>
+          )}
+          {/* Pickup gain, live: lift a distant lecturer without re-starting */}
+          <label className="mt-3 flex items-center gap-2 text-xs text-foreground-500">
+            <i className="ri-mic-line"></i>收音增益
+            <input
+              type="range" min={1} max={MAX_GAIN} step={0.5} value={live.gain}
+              onChange={(e) => live.setGain(Number(e.target.value))}
+              className="flex-1 accent-accent-500"
+            />
+            <span className="font-mono w-10 text-right">{live.gain.toFixed(1)}×</span>
+          </label>
           {live.status.speakers.length > 0 && (
             <div className="flex items-center gap-1.5 flex-wrap mt-3">
               <span className="text-xs text-foreground-400 mr-1"><i className="ri-user-voice-line text-accent-500"></i> 说话人</span>
@@ -115,7 +157,7 @@ export default function RecordPage() {
         </div>
 
         <div ref={boxRef} className="flex-1 overflow-y-auto px-5 pb-4 space-y-3">
-          {live.lines.length === 0 && !live.partial && (
+          {live.lines.length === 0 && !live.partial && live.micActive && (
             <p className="text-sm text-foreground-400 italic mt-6">麦克风已开启,等待第一句话…</p>
           )}
           {live.lines.map((l) => (
@@ -144,11 +186,15 @@ export default function RecordPage() {
           <button onClick={() => live.mark()} className="flex flex-col items-center gap-1 text-yellow-600 w-16">
             <i className="ri-star-fill text-2xl"></i><span className="text-[11px]">标记重点</span>
           </button>
+          <button onClick={() => setShowCourseware(true)} className="flex flex-col items-center gap-1 text-foreground-600 w-16">
+            <i className="ri-slideshow-2-line text-2xl"></i><span className="text-[11px]">课件</span>
+          </button>
           <button onClick={() => live.stop()}
             className="flex flex-col items-center gap-1 text-red-600 w-16">
             <i className="ri-stop-circle-fill text-3xl"></i><span className="text-[11px]">结束</span>
           </button>
         </div>
+        {showCourseware && <ClassFileLibrary onClose={() => setShowCourseware(false)} />}
       </div>
     );
   }
@@ -170,6 +216,15 @@ export default function RecordPage() {
       )}
 
       <div className="mt-5 space-y-4 max-w-5xl">
+        {appendSid ? (
+          <p className="text-xs text-accent-700 bg-accent-50 border border-accent-200 rounded-xl px-3 py-2">
+            <i className="ri-play-list-add-line mr-1"></i>会接在这节课已录的内容后面继续录,不会新开一节
+          </p>
+        ) : forDate && (
+          <p className="text-xs text-accent-700 bg-accent-50 border border-accent-200 rounded-xl px-3 py-2">
+            <i className="ri-calendar-check-line mr-1"></i>这次录音会归到 {forDate} 的这节课
+          </p>
+        )}
         <div>
           <label className="text-xs text-foreground-500">课程名</label>
           <input value={title} onChange={(e) => setTitle(e.target.value)}
@@ -242,7 +297,7 @@ export default function RecordPage() {
           className="w-24 h-24 flex items-center justify-center bg-accent-500 rounded-full shadow-lg active:scale-95 transition-transform disabled:opacity-50">
           <i className="ri-mic-fill text-white text-4xl"></i>
         </button>
-        <span className="mt-3 text-sm text-foreground-500">点击开始录音</span>
+        <span className="mt-3 text-sm text-foreground-500">{appendSid ? '点击继续录这节课' : '点击开始录音'}</span>
         <p className="mt-4 text-[11px] text-foreground-400 text-center max-w-xs leading-relaxed">
           录音、识别、说话人区分均在你自己的服务器上完成,音频不会上传至第三方。
         </p>

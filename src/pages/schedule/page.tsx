@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '@/lib/api';
+import { useSessions, type SessionRecord } from '@/hooks/useRecords';
 
 interface ScheduleEvent {
   name: string;
@@ -8,6 +10,20 @@ interface ScheduleEvent {
   end: string;
   location: string;
   room: string;
+  teacher?: string;   // read off the timetable
+  credits?: string;   // e.g. "5.0"
+}
+
+// 高数第1课 / 高数(2) -> 高数
+const baseName = (t: string) =>
+  (t || '').replace(/\s*第\s*\d+\s*[课讲节]\s*$/, '').replace(/\s*[（(]\s*\d+\s*[）)]\s*$/, '').trim();
+
+/** The recording of this lesson, if one exists: same day, and the full title or else the course name matches
+ *  (a course meeting twice in one day must open the right one, so the exact title wins). */
+function findRecording(ev: ScheduleEvent, sessions: SessionRecord[]): SessionRecord | undefined {
+  const sameDay = sessions.filter((r) => r.date === ev.date);
+  const base = baseName(ev.name);
+  return sameDay.find((r) => r.title === ev.name) || sameDay.find((r) => baseName(r.title) === base);
 }
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -18,6 +34,8 @@ function weekdayOf(date: string): string {
 }
 
 export default function SchedulePage() {
+  const navigate = useNavigate();
+  const { sessions, refresh } = useSessions();
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -45,7 +63,17 @@ export default function SchedulePage() {
       .map(([date, evs]) => ({ date, evs: evs.sort((a, b) => a.start.localeCompare(b.start)) }));
   }, [events]);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  // Decide on a freshly fetched list: a class recorded meanwhile on another device would otherwise look
+  // unrecorded here, and tapping it would start a second recording of the same lesson.
+  const openLesson = async (ev: ScheduleEvent) => {
+    const fresh = await refresh();
+    const rec = findRecording(ev, fresh.length ? fresh : sessions);
+    if (rec) navigate(`/session/${encodeURIComponent(rec.sid)}`);
+    else navigate(`/record?title=${encodeURIComponent(ev.name)}&for_date=${encodeURIComponent(ev.date)}`);
+  };
 
   return (
     <div className="min-h-full bg-background-50">
@@ -103,14 +131,38 @@ export default function SchedulePage() {
                     </div>
                     <div className="w-px self-stretch bg-background-200"></div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-foreground-800 truncate">{ev.name}</p>
+                      <p className="text-sm font-medium text-foreground-800 truncate">
+                        {ev.name}
+                        {ev.credits && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-primary-100 text-primary-700 align-middle">{ev.credits} 学分</span>}
+                      </p>
                       {(ev.location || ev.room) && (
                         <p className="text-xs text-foreground-400 mt-0.5 flex items-center gap-1 truncate">
                           <i className="ri-map-pin-line"></i>
                           {[ev.location, ev.room].filter(Boolean).join(' · ')}
                         </p>
                       )}
+                      {ev.teacher && (
+                        <p className="text-xs text-foreground-400 mt-0.5 flex items-center gap-1 truncate">
+                          <i className="ri-user-line"></i>{ev.teacher}
+                        </p>
+                      )}
                     </div>
+                    {(() => {
+                      const rec = findRecording(ev, sessions);
+                      if (rec) {
+                        return (
+                          <button onClick={() => void openLesson(ev)} className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 bg-background-100 text-foreground-600 rounded-full text-xs font-medium">
+                            <i className="ri-file-text-line"></i>查看
+                          </button>
+                        );
+                      }
+                      if (date < today) return null;
+                      return (
+                        <button onClick={() => void openLesson(ev)} className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 bg-accent-500 text-background-50 rounded-full text-xs font-semibold">
+                          <i className="ri-mic-line"></i>录这节
+                        </button>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
