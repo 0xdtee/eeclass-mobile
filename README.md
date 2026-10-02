@@ -28,7 +28,8 @@ All heavy lifting — speech recognition, speaker separation, voiceprints and th
 - **Real-time transcription** — streaming captions over a WebSocket to the backend, with speaker labels and inline translated subtitles (off by default; your choice is remembered).
 - **Recording controls** — start / pause / mark a key point / stop; live-adjustable pickup gain (1–12×); open courseware from the file library without leaving the recording.
 - **Stays recording** — the session lives above the page router, so you can browse other pages mid-class; the home page shows a banner back to the recording.
-- **Dropout detection** — when the phone suspends the mic (app backgrounded / screen locked) the recording screen says so plainly, and the mic is reopened automatically when you return.
+- **Dropout detection & recovery** — when the phone suspends the mic (app backgrounded / screen locked) the recording screen says so plainly and reopens the mic when you return; if iOS kills and relaunches the app mid-class, the transcript so far is restored from the server and 「重新接上麦克风」 keeps recording the same class.
+- **Continue a class** — 「继续录这节课」 on a class page records onto that same class instead of starting a second one.
 - **Record a timetable lesson** — tap 录这节 on the timetable to record that lesson; the recording is filed under the lesson's day, and a lesson already recorded (on any device) opens instead of starting a second one.
 
 ### After class
