@@ -1,6 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import BackButton from '@/components/feature/BackButton';
+import { useLiveCaption } from '@/hooks/useLiveCaption';
 import { useSessionDetail, markLine, autoHighlight, type TranscriptionLine } from '@/hooks/useRecords';
 import { apiFetch, getServerUrl, getToken } from '@/lib/api';
 import { downloadSubtitle, hasSubtitleTiming, type SubtitleFormat } from '@/lib/exportSubtitle';
@@ -85,6 +86,9 @@ MiniPlayer.displayName = 'MiniPlayer';
 export default function SessionDetailPage() {
   const { sid } = useParams<{ sid: string }>();
   const navigate = useNavigate();
+  const live = useLiveCaption();
+  const recordingThis = (live.running || live.starting) && !!sid && live.liveSid === sid;
+  const recordingOther = (live.running || live.starting) && !recordingThis;
   const { detail, loading, error, refresh } = useSessionDetail(sid || null);
 
   const lines = detail?.transcription || [];
@@ -233,6 +237,18 @@ export default function SessionDetailPage() {
               <i className="ri-brain-line"></i>
               复习
             </button>
+            {/* A class cut off mid-way (the app was killed in the background, the mic died) continues here,
+                appended to what it already holds -- instead of 录音 making a second class of the same lesson. */}
+            {!recordingOther && (
+              <button
+                onClick={() => navigate(recordingThis ? '/record'
+                  : `/record?append=${encodeURIComponent(sid)}&title=${encodeURIComponent(detail?.title || '')}`)}
+                className="flex-1 md:flex-none md:px-5 py-2.5 bg-red-50 text-red-600 border border-red-200 rounded-lg text-xs md:text-sm font-medium cursor-pointer hover:bg-red-100 transition-colors whitespace-nowrap flex items-center justify-center gap-1.5"
+              >
+                <i className="ri-mic-line"></i>
+                {recordingThis ? '回到录音页' : '继续录这节课'}
+              </button>
+            )}
           </div>
         )}
 

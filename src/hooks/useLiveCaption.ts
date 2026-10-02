@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, createContext, useContext, createElement } from 'react';
 import type { ReactNode } from 'react';
 import { useAuth } from '@/hooks/useAuth';
-import { getServerUrl, getToken, clearToken } from '@/lib/api';
+import { getServerUrl, getToken, clearToken, apiFetch } from '@/lib/api';
 import { getMicGain, setMicGain, MIC_GAIN_MAX } from '@/lib/settings';
 
 export { getServerUrl, getToken };
@@ -212,6 +212,8 @@ function useLiveCaptionState(enabled: boolean) {
   // control commands issued before the socket finished connecting (e.g. a fast tap on record):
   // queue them and flush on open, so 'start' is never silently dropped.
   const pendingRef = useRef<Record<string, unknown>[]>([]);
+  // the class this start continues (append), so 'started' knows to bring back what it already holds
+  const appendRef = useRef<string | null>(null);
 
   const send = useCallback((msg: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -339,6 +341,26 @@ function useLiveCaptionState(enabled: boolean) {
     wakeLockRef.current = null;
   }, []);
 
+  /** Bring back what a class already holds (after the app was relaunched mid-recording, or when continuing a
+   *  class): fetch its transcript and merge it with whatever lines arrived meanwhile, deduped by id. */
+  const loadExisting = useCallback(async (sid: string) => {
+    if (!sid) return;
+    try {
+      const t = await apiFetch<{ lines: Record<string, unknown>[] }>(`/api/transcript/${encodeURIComponent(sid)}`);
+      const old = (t.lines || []).map((l) => ({
+        id: l.id as number, ts: (l.ts as string) || '', start: (l.start as number) || 0, end: (l.end as number) || 0,
+        speaker: (l.speaker as string) || '', speaker_id: (l.speaker_id as number) ?? 0, text: (l.text as string) || '',
+        kind: (l.kind as 'key' | 'define' | null) ?? null, new_para: !!l.new_para,
+        translation: (l.translation as string) || undefined,
+      }) as CaptionLine);
+      setLines((prev) => {
+        const byId = new Map<number, CaptionLine>();
+        [...old, ...prev].forEach((l) => byId.set(l.id, l));
+        return [...byId.values()].sort((a, b) => a.id - b.id);
+      });
+    } catch { /* the live lines still show; the class page has the full transcript */ }
+  }, []);
+
   /* ---------- WebSocket ---------- */
   const connect = useCallback(() => {
     if (!aliveRef.current) return;
@@ -388,11 +410,15 @@ function useLiveCaptionState(enabled: boolean) {
       switch (m.type) {
         case 'hello':
           if (m.resumed) {
+            // The app came back (often relaunched by iOS) while its class was still recording on the server.
             setRunning(true); setStarting(false);
-            if (m.sid) setLiveSid(m.sid as string);
+            if (m.sid) { setLiveSid(m.sid as string); void loadExisting(m.sid as string); }
             recordingRef.current = true;
-            void startMic();
-            setNotice('已恢复录制');
+            // iOS often refuses the mic until the user taps: say so instead of claiming it resumed, and offer
+            // 「重新接上麦克风」 -- the old silence let the class record nothing until the server ended it.
+            startMic()
+              .then(() => setNotice('已恢复录制'))
+              .catch(() => setNotice('麦克风没能自动接上(系统要求点一下),请点「重新接上麦克风」继续录这节课'));
           } else {
             setRunning(!!m.running);
           }
@@ -403,7 +429,9 @@ function useLiveCaptionState(enabled: boolean) {
           setLines([]); setPartial('');
           setLastDir((m.dir as string) || '');
           setLiveSid((m.sid as string) || '');
-          setNotice('已开始录制');
+          setNotice(appendRef.current ? '接着这节课继续录音' : '已开始录制');
+          if (appendRef.current && m.sid) void loadExisting(m.sid as string);
+          appendRef.current = null;
           break;
         case 'stopped':
           recordingRef.current = false;
@@ -452,7 +480,7 @@ function useLiveCaptionState(enabled: boolean) {
         case 'error': setError((m.msg as string) || ''); setStarting(false); stopMic(); break;
       }
     };
-  }, [stopMic, startMic]);
+  }, [stopMic, startMic, loadExisting]);
 
   useEffect(() => {
     if (!enabled) return;                 // only hold the socket/mic open while signed in
@@ -504,7 +532,7 @@ function useLiveCaptionState(enabled: boolean) {
         stopMic();
         startMic()
           .then(() => setNotice('麦克风已断开,已自动重新接上'))
-          .catch(() => setNotice('麦克风已断开,且无法自动恢复,请结束后重新开始录音'))
+          .catch(() => setNotice('麦克风已断开,且无法自动恢复,请点「重新接上麦克风」'))
           .finally(() => { reopening = false; });
       }
     }, 1500);
@@ -513,6 +541,7 @@ function useLiveCaptionState(enabled: boolean) {
 
   const start = useCallback(async (opts: StartOptions = {}) => {
     setStarting(true); setError(''); setLines([]); setPartial('');
+    appendRef.current = opts.appendSid || null;
     try {
       await startMic();
     } catch (e) {
@@ -575,10 +604,21 @@ function useLiveCaptionState(enabled: boolean) {
     [lines, lastDir, liveSid]
   );
 
+  // Reopen the mic from a tap (iOS only grants it on a user gesture). Keeps recording the same class --
+  // the old advice was to end and start again, which is exactly what split one class into two.
+  const reopenMic = useCallback(() => {
+    stopMic();
+    startMic()
+      .then(() => setNotice('麦克风已重新接上,继续录这节课'))
+      .catch((e) => setNotice('麦克风还是打不开:' + (e instanceof Error ? e.message : String(e))));
+  }, [startMic, stopMic]);
+  // Recording, but no mic open: nothing is being captured (the stall watcher only sees an OPEN mic).
+  const micLost = running && !paused && !starting && !micActive;
+
   return {
     connected, authFailed, running, paused, starting, micActive, deepseekReady,
     lines, partial, status, notice, error, lastDir, liveSid, audioStalled, gain, setGain,
-    start, stop, setPaused: setPausedCmd, mark, rename, summarize,
+    start, stop, setPaused: setPausedCmd, mark, rename, summarize, micLost, reopenMic,
   };
 }
 

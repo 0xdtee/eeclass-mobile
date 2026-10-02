@@ -35,6 +35,8 @@ export default function RecordPage() {
   // Opened from a timetable lesson (?title=&for_date=): name the recording after it and file it under that
   // lesson's day, so a recording started a little early still belongs to that class.
   const forDate = sp.get('for_date') || '';
+  // Opened from a class's 「继续录这节课」 (?append=<sid>): record onto that class instead of starting a new one
+  const appendSid = sp.get('append') || '';
   const [title, setTitle] = useState(() => sp.get('title') || defaultTitle());
   const [showCourseware, setShowCourseware] = useState(false);
   const [aiCorrect, setAiCorrect] = useState(() => getAiDefault('aiCorrect'));
@@ -71,7 +73,7 @@ export default function RecordPage() {
     setJustSaved('');
     void live.start({
       title: title.trim() || defaultTitle(), aiCorrect, smartSeg, model, translateFrom, translateTo, subjects,
-      forDate: forDate || null,
+      forDate: forDate || null, appendSid: appendSid || null,
     });
   };
 
@@ -112,13 +114,20 @@ export default function RecordPage() {
             </div>
             <span className="text-xs text-foreground-400">{live.status.lines} 句</span>
           </div>
-          {/* Phones suspend capture when the app is backgrounded or the screen locks, while the socket stays up */}
-          {live.audioStalled && (
-            <div className="mt-3 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl">
-              <i className="ri-error-warning-fill text-amber-500 mt-0.5"></i>
-              <p className="text-xs text-amber-700 leading-relaxed">
-                录音已中断 —— 请保持本页面在前台、屏幕常亮。回到本页后会自动重新接上麦克风。
+          {/* Phones suspend capture when the app is backgrounded or the screen locks, while the socket stays up;
+              after iOS relaunches the app mid-class the mic may not be open at all until the user taps. */}
+          {(live.micLost || live.audioStalled) && (
+            <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl">
+              <i className="ri-error-warning-fill text-amber-500"></i>
+              <p className="flex-1 text-xs text-amber-700 leading-relaxed">
+                {live.micLost
+                  ? '麦克风没接上,现在没在录音。点右边按钮接着录这节课(不会新开一节)。'
+                  : '录音已中断 —— 请保持本页面在前台、屏幕常亮。'}
               </p>
+              <button onClick={live.reopenMic}
+                className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-full bg-amber-500 text-white text-xs font-semibold">
+                <i className="ri-mic-line"></i>重新接上麦克风
+              </button>
             </div>
           )}
           {live.notice && live.notice.startsWith('麦克风') && (
@@ -148,7 +157,7 @@ export default function RecordPage() {
         </div>
 
         <div ref={boxRef} className="flex-1 overflow-y-auto px-5 pb-4 space-y-3">
-          {live.lines.length === 0 && !live.partial && (
+          {live.lines.length === 0 && !live.partial && live.micActive && (
             <p className="text-sm text-foreground-400 italic mt-6">麦克风已开启,等待第一句话…</p>
           )}
           {live.lines.map((l) => (
@@ -207,7 +216,11 @@ export default function RecordPage() {
       )}
 
       <div className="mt-5 space-y-4 max-w-5xl">
-        {forDate && (
+        {appendSid ? (
+          <p className="text-xs text-accent-700 bg-accent-50 border border-accent-200 rounded-xl px-3 py-2">
+            <i className="ri-play-list-add-line mr-1"></i>会接在这节课已录的内容后面继续录,不会新开一节
+          </p>
+        ) : forDate && (
           <p className="text-xs text-accent-700 bg-accent-50 border border-accent-200 rounded-xl px-3 py-2">
             <i className="ri-calendar-check-line mr-1"></i>这次录音会归到 {forDate} 的这节课
           </p>
@@ -284,7 +297,7 @@ export default function RecordPage() {
           className="w-24 h-24 flex items-center justify-center bg-accent-500 rounded-full shadow-lg active:scale-95 transition-transform disabled:opacity-50">
           <i className="ri-mic-fill text-white text-4xl"></i>
         </button>
-        <span className="mt-3 text-sm text-foreground-500">点击开始录音</span>
+        <span className="mt-3 text-sm text-foreground-500">{appendSid ? '点击继续录这节课' : '点击开始录音'}</span>
         <p className="mt-4 text-[11px] text-foreground-400 text-center max-w-xs leading-relaxed">
           录音、识别、说话人区分均在你自己的服务器上完成,音频不会上传至第三方。
         </p>
